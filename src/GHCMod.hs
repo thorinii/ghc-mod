@@ -6,8 +6,6 @@ import Config (cProjectVersion)
 import MonadUtils (liftIO)
 import Control.Applicative
 import Control.Monad
-import Control.Exception ( SomeException(..), fromException, Exception
-                         , Handler(..), catches, throw)
 import Data.Typeable (Typeable)
 import Data.Version (showVersion)
 import Data.Default
@@ -15,6 +13,7 @@ import Data.List
 import Data.List.Split
 import Data.Maybe
 import Data.Char (isSpace)
+import Exception
 import Language.Haskell.GhcMod
 import Language.Haskell.GhcMod.Internal
 import Paths_ghc_mod
@@ -89,9 +88,6 @@ ghcModUsage =
  \\n\
  \    - list [FLAGS...] | modules [FLAGS...]\n\
  \        List all visible modules.\n\
- \      Flags:\n\
- \        -d\n\
- \            Also print the modules' package.\n\
  \\n\
  \    - lang\n\
  \        List all known GHC language extensions.\n\
@@ -183,12 +179,12 @@ ghcModUsage =
  \        -l\n\
  \            Option to be passed to hlint.\n\
  \\n\
- \    - root FILE\n\
- \       Try to find the project directory given FILE. For Cabal\n\
- \       projects this is the directory containing the cabal file, for\n\
- \       projects that use a cabal sandbox but have no cabal file this is the\n\
- \       directory containing the sandbox and otherwise this is the directory\n\
- \       containing FILE.\n\
+ \    - root\n\
+ \        Try to find the project directory. For Cabal projects this is the\n\
+ \        directory containing the cabal file, for projects that use a cabal\n\
+ \        sandbox but have no cabal file this is the directory containing the\n\
+ \        cabal.sandbox.config file and otherwise this is the current\n\
+ \        directory.\n\
  \\n\
  \    - doc MODULE\n\
  \        Try finding the html documentation directory for the given MODULE.\n\
@@ -227,27 +223,32 @@ ghcModiUsage =
  where
    indent = ("    "++)
 
-
-
-
 cmdUsage :: String -> String -> String
-cmdUsage cmd s =
+cmdUsage cmd realUsage =
   let
       -- Find command head
-      a = dropWhile (not . (("    - " ++ cmd) `isInfixOf`)) $ lines s
+      a = dropWhile (not . isCmdHead) $ lines realUsage
       -- Take til the end of the current command block
       b = flip takeWhile a $ \l ->
-           all isSpace l || (isIndented l && (isCurrCmdHead l || isNotCmdHead l))
+            all isSpace l || (isIndented l && (isCmdHead l || isNotCmdHead l))
       -- Drop extra newline from the end
       c = dropWhileEnd (all isSpace) b
 
       isIndented    = ("    " `isPrefixOf`)
       isNotCmdHead  = ( not .  ("    - " `isPrefixOf`))
-      isCurrCmdHead = (("    - " ++ cmd) `isPrefixOf`)
+
+      containsAnyCmdHead s = (("    - ") `isInfixOf` s)
+      containsCurrCmdHead s = (("    - " ++ cmd) `isInfixOf` s)
+      isCmdHead s =
+          containsAnyCmdHead s &&
+            or [ containsCurrCmdHead s
+               , any (cmd `isPrefixOf`) (splitOn " | " s)
+               ]
 
       unindent (' ':' ':' ':' ':l) = l
       unindent l = l
   in unlines $ unindent <$> c
+
 ----------------------------------------------------------------
 
 option :: [Char] -> [String] -> String -> ArgDescr a -> OptDescr a
@@ -321,7 +322,8 @@ handler = flip catches $
           , Handler $ \(InvalidCommandLine e) -> do
                 case e of
                   Left cmd ->
-                      exitError $ (cmdUsage cmd ghcModUsage) ++ "\n"
+                      exitError $ "Usage for `"++cmd++"' command:\n\n"
+                                  ++ (cmdUsage cmd ghcModUsage) ++ "\n"
                                   ++ progName ++ ": Invalid command line form."
                   Right msg -> exitError $ progName ++ ": " ++ msg
           ]
@@ -535,23 +537,37 @@ withParseCmd spec action args  = do
   (opts', rest) <- parseCommandArgs spec args <$> options
   withOptions (const opts') $ action rest
 
+withParseCmd' :: (IOish m, ExceptionMonad m)
+              => String
+              -> [OptDescr (Options -> Options)]
+              -> ([String] -> GhcModT m a)
+              -> [String]
+              -> GhcModT m a
+withParseCmd' cmd spec action args =
+    catchArgs cmd $ withParseCmd spec action args
+
+catchArgs :: (Monad m, ExceptionMonad m) => String -> m a -> m a
+catchArgs cmd action =
+    action `gcatch` \(PatternMatchFail _) ->
+        throw $ InvalidCommandLine (Left cmd)
+
 modulesCmd, languagesCmd, flagsCmd, browseCmd, checkSyntaxCmd, expandTemplateCmd,
   debugInfoCmd, infoCmd, typesCmd, splitsCmd, sigCmd, refineCmd, autoCmd,
   findSymbolCmd, lintCmd, rootInfoCmd, pkgDocCmd, dumpSymbolCmd, bootCmd
   :: IOish m => [String] -> GhcModT m String
 
-modulesCmd    = withParseCmd [] $ \[] -> modules
-languagesCmd  = withParseCmd [] $ \[] -> languages
-flagsCmd      = withParseCmd [] $ \[] -> flags
-debugInfoCmd  = withParseCmd [] $ \[] -> debugInfo
-rootInfoCmd   = withParseCmd [] $ \[] -> rootInfo
+modulesCmd    = withParseCmd' "modules" [] $ \[] -> modules
+languagesCmd  = withParseCmd' "lang"    [] $ \[] -> languages
+flagsCmd      = withParseCmd' "flag"    [] $ \[] -> flags
+debugInfoCmd  = withParseCmd' "debug"   [] $ \[] -> debugInfo
+rootInfoCmd   = withParseCmd' "root"    [] $ \[] -> rootInfo
 -- internal
-bootCmd       = withParseCmd [] $ \[] -> boot
+bootCmd       = withParseCmd' "boot" [] $ \[] -> boot
 
-dumpSymbolCmd     = withParseCmd [] $ \[tmpdir] -> dumpSymbol tmpdir
-findSymbolCmd     = withParseCmd [] $ \[sym]  -> findSymbol sym
-pkgDocCmd         = withParseCmd [] $ \[mdl]  -> pkgDoc mdl
-lintCmd           = withParseCmd s  $ \[file] -> lint file
+dumpSymbolCmd     = withParseCmd' "dump" [] $ \[tmpdir] -> dumpSymbol tmpdir
+findSymbolCmd     = withParseCmd' "find" [] $ \[sym]  -> findSymbol sym
+pkgDocCmd         = withParseCmd' "doc"  [] $ \[mdl]  -> pkgDoc mdl
+lintCmd           = withParseCmd' "lint" s  $ \[file] -> lint file
  where s = hlintArgSpec
 browseCmd         = withParseCmd s  $ \mdls   -> concat <$> browse `mapM` mdls
  where s = browseArgSpec
@@ -588,6 +604,7 @@ hlintArgSpec =
     [ option "h" ["hlintOpt"] "Option to be passed to hlint" $
              reqArg "hlintOpt" $ \h o -> o { hlintOpts = h : hlintOpts o }
     ]
+
 browseArgSpec :: [OptDescr (Options -> Options)]
 browseArgSpec =
     [ option "o" ["operators"] "Also print operators." $
