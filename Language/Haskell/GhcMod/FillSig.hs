@@ -476,7 +476,7 @@ getPatsForVariable tcs (lineNo, colNo) =
 #else
                     :: [G.LMatch Id]
 #endif
-              (L _ (G.Match pats _ _ _):_) = m
+              (L _ (G.Match _ pats _ _):_) = m
            in (funId, pats)
         _ -> (error "This should never happen", [])
 
